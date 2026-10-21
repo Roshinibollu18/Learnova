@@ -1,5 +1,6 @@
-
 import os
+import requests
+from dotenv import load_dotenv
 from datetime import datetime, timedelta
 
 from flask import Flask, jsonify, request
@@ -13,6 +14,9 @@ from flask_jwt_extended import (
 from werkzeug.security import generate_password_hash, check_password_hash
 
 from models import db, User, Course, Lesson, Enrollment, LessonProgress
+load_dotenv(
+    dotenv_path=os.path.join(os.path.dirname(__file__), ".env")
+)
 
 app = Flask(__name__)
 
@@ -665,6 +669,133 @@ def student_dashboard():
 with app.app_context():
     db.create_all()
 
+@app.post("/api/chat")
+@jwt_required()
+def ai_chat():
+    api_key = os.getenv("GEMINI_API_KEY")
 
+    if not api_key:
+        return jsonify({
+            "message": "Gemini API key is not configured."
+        }), 500
+
+    data = request.get_json(silent=True) or {}
+    question = str(data.get("message", "")).strip()
+    history = data.get("history", [])
+
+    if not question:
+        return jsonify({
+            "message": "Please enter a question."
+        }), 400
+
+    if len(question) > 2000:
+        return jsonify({
+            "message": "Please keep your question under 2000 characters."
+        }), 400
+
+    contents = []
+
+    # Convert the existing chat history into Gemini format.
+    if isinstance(history, list):
+        for item in history[-10:]:
+            if not isinstance(item, dict):
+                continue
+
+            role = item.get("role")
+            content = item.get("content")
+
+            if role not in ("user", "assistant"):
+                continue
+
+            if not isinstance(content, str) or not content.strip():
+                continue
+
+            contents.append({
+                "role": "user" if role == "user" else "model",
+                "parts": [{"text": content[:2000]}]
+            })
+
+    # Add the student's latest question.
+    contents.append({
+        "role": "user",
+        "parts": [{"text": question}]
+    })
+
+    payload = {
+        "systemInstruction": {
+            "parts": [{
+                "text": (
+                    "You are Learnova AI Tutor. Help students learn "
+                    "Python, Data Science, Machine Learning, SQL, "
+                    "Artificial Intelligence, and Web Development. "
+                    "Explain concepts clearly for beginners and provide "
+                    "simple examples when useful."
+                )
+            }]
+        },
+        "contents": contents,
+        "generationConfig": {
+            "temperature": 0.7,
+            "maxOutputTokens": 1000
+        }
+    }
+
+    url = (
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/models/gemini-3.8-flash:generateContent"
+    )
+
+    try:
+        response = requests.post(
+            url,
+            headers={
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=60
+        )
+
+        if not response.ok:
+            print(
+                "Gemini API error:",
+                response.status_code,
+                response.text[:1000]
+            )
+
+        response.raise_for_status()
+        result = response.json()
+
+        candidates = result.get("candidates", [])
+
+        if not candidates:
+            return jsonify({
+                "message": "Gemini returned no answer. Please try again."
+            }), 502
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        answer = "\n".join(
+            part["text"]
+            for part in parts
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        )
+
+        if not answer.strip():
+            return jsonify({
+                "message": "Gemini returned an empty answer."
+            }), 502
+
+        # Keep the existing React interface compatible.
+        return jsonify({"answer": answer}), 200
+
+    except requests.RequestException as error:
+        print("Gemini API request failed:", error)
+
+        return jsonify({
+            "message": (
+                "Gemini could not respond. Check the backend "
+                "terminal for the API error."
+            )
+        }), 502
 if __name__ == "__main__":
     app.run(debug=True, port=5000)

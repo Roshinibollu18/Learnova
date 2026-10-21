@@ -8,12 +8,17 @@ const API_URL =
 export default function App() {
   const [page, setPage] = useState("home");
   const [courses, setCourses] = useState([]);
+  const [searchTerm, setSearchTerm] = useState("");
   const [myCourses, setMyCourses] = useState([]);
   const [selectedCourse, setSelectedCourse] = useState(null);
   const [lessons, setLessons] = useState([]);
   const [progress, setProgress] = useState({});
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+const [chatInput, setChatInput] = useState("");
+const [chatMessages, setChatMessages] = useState([]);
+const [chatLoading, setChatLoading] = useState(false);
 
   const [user, setUser] = useState(() => {
     try {
@@ -433,7 +438,71 @@ export default function App() {
       setMessage(error.message || "Unable to update lesson.");
     }
   }
+const filteredCourses = courses.filter((course) => {
+  const query = searchTerm.trim().toLowerCase();
 
+  if (!query) {
+    return true;
+  }
+
+  return [
+    course.title,
+    course.description,
+    course.category,
+    course.instructor,
+  ].some((value) =>
+    String(value || "").toLowerCase().includes(query)
+  );
+});
+async function sendChatMessage(event) {
+  event.preventDefault();
+
+  const question = chatInput.trim();
+
+  if (!question || chatLoading) {
+    return;
+  }
+
+  const history = chatMessages
+    .slice(-10)
+    .map(({ role, content }) => ({ role, content }));
+
+  setChatMessages((previous) => [
+    ...previous,
+    { role: "user", content: question }
+  ]);
+
+  setChatInput("");
+  setChatLoading(true);
+
+  try {
+    const data = await apiRequest("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({
+        message: question,
+        history
+      })
+    });
+
+    setChatMessages((previous) => [
+      ...previous,
+      {
+        role: "assistant",
+        content: data.answer || "No answer was returned."
+      }
+    ]);
+  } catch (error) {
+    setChatMessages((previous) => [
+      ...previous,
+      {
+        role: "assistant",
+        content: `Unable to get an answer: ${error.message}`
+      }
+    ]);
+  } finally {
+    setChatLoading(false);
+  }
+}
   const isAuthPage = [
     "adminLogin",
     "studentLogin",
@@ -612,17 +681,27 @@ export default function App() {
               </div>
 
               <span className="course-count">
-                {courses.length} courses
+                {filteredCourses.length} courses
               </span>
             </div>
-
-            {courses.length === 0 ? (
-              <p className="empty-state">
-                No courses available yet.
-              </p>
-            ) : (
+<div className="course-search">
+  <input
+    type="search"
+    placeholder="Search courses by name, topic, or category..."
+    aria-label="Search courses"
+    value={searchTerm}
+    onChange={(event) => setSearchTerm(event.target.value)}
+  />
+</div>
+            {filteredCourses.length === 0 ? (
+  <p className="empty-state">
+    {searchTerm.trim()
+      ? `No courses found for "${searchTerm}".`
+      : "No courses available yet."}
+  </p>
+) : (
               <div className="course-grid">
-                {courses.map((course, index) => (
+                {filteredCourses.map((course, index) => (
                   <article className="course-card" key={course.id}>
                     {course.image_url ? (
                       <img
@@ -1502,7 +1581,82 @@ export default function App() {
           </section>
         </main>
       )}
+{user?.role === "student" && (
+  <div className="chatbot-widget">
+    {chatOpen && (
+      <section className="chatbot-panel">
+        <header className="chatbot-header">
+          <div>
+            <strong>Learnova AI Tutor</strong>
+            <small>Ask questions and learn new skills</small>
+          </div>
 
+          <button
+            type="button"
+            onClick={() => setChatOpen(false)}
+            aria-label="Close AI Tutor"
+          >
+            ×
+          </button>
+        </header>
+
+        <div className="chatbot-messages">
+          {chatMessages.length === 0 && (
+            <p className="chatbot-welcome">
+              Hi! I'm your AI Tutor. Ask me about Python,
+              Data Science, SQL, Machine Learning, or AI.
+            </p>
+          )}
+
+          {chatMessages.map((message, index) => (
+            <div
+              key={`${message.role}-${index}`}
+              className={`chatbot-message ${message.role}`}
+            >
+              {message.content}
+            </div>
+          ))}
+
+          {chatLoading && (
+            <div className="chatbot-message assistant">
+              Thinking...
+            </div>
+          )}
+        </div>
+
+        <form
+          className="chatbot-form"
+          onSubmit={sendChatMessage}
+        >
+          <input
+            type="text"
+            value={chatInput}
+            onChange={(event) => setChatInput(event.target.value)}
+            placeholder="Ask your question..."
+            maxLength={2000}
+            disabled={chatLoading}
+            aria-label="Ask the AI tutor"
+          />
+
+          <button
+            type="submit"
+            disabled={!chatInput.trim() || chatLoading}
+          >
+            Send
+          </button>
+        </form>
+      </section>
+    )}
+
+    <button
+      className="chatbot-toggle"
+      type="button"
+      onClick={() => setChatOpen((open) => !open)}
+    >
+      {chatOpen ? "Close AI Tutor ×" : "Ask AI Tutor 💬"}
+    </button>
+  </div>
+)}
       <footer className="footer">
         <div>
           <h2>
