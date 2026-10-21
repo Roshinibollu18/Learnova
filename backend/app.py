@@ -669,6 +669,54 @@ def student_dashboard():
 with app.app_context():
     db.create_all()
 
+    # Add sample courses only if the database is empty
+    if Course.query.count() == 0:
+        starter_courses = [
+            Course(
+                title="Python Programming",
+                description="Learn Python basics, variables, loops, and functions.",
+                category="Programming",
+                instructor="Learnova Team",
+                image_url="",
+                duration="4 weeks",
+            ),
+            Course(
+                title="Data Science Essentials",
+                description="Learn data analysis and data visualization.",
+                category="Data Science",
+                instructor="Learnova Team",
+                image_url="",
+                duration="5 weeks",
+            ),
+            Course(
+                title="Machine Learning Basics",
+                description="Explore machine learning concepts and algorithms.",
+                category="Machine Learning",
+                instructor="Learnova Team",
+                image_url="",
+                duration="6 weeks",
+            ),
+            Course(
+                title="Web Development",
+                description="Learn HTML, CSS, and JavaScript fundamentals.",
+                category="Web Development",
+                instructor="Learnova Team",
+                image_url="",
+                duration="4 weeks",
+            ),
+            Course(
+                title="Artificial Intelligence",
+                description="Explore AI concepts and practical applications.",
+                category="Artificial Intelligence",
+                instructor="Learnova Team",
+                image_url="",
+                duration="5 weeks",
+            ),
+        ]
+
+        db.session.add_all(starter_courses)
+        db.session.commit()
+
 @app.post("/api/chat")
 @jwt_required()
 def ai_chat():
