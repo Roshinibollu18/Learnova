@@ -23,6 +23,7 @@ app = Flask(__name__)
 # Use the existing database. Do not delete it.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 os.makedirs(INSTANCE_DIR, exist_ok=True)
 DATABASE_PATH = os.path.join(INSTANCE_DIR, "learnova.db")
 
@@ -720,15 +721,31 @@ with app.app_context():
 @app.post("/api/chat")
 @jwt_required()
 def ai_chat():
-    api_key = os.getenv("GEMINI_API_KEY")
+    # --------------------------------------------------
+    # 1. Read and validate the request
+    # --------------------------------------------------
+    api_key = (
+        os.getenv("GEMINI_API_KEY")
+        or os.getenv("GOOGLE_API_KEY")
+    )
 
     if not api_key:
         return jsonify({
-            "message": "Gemini API key is not configured."
+            "message": (
+                "Gemini API key is missing. "
+                "Check the backend .env file."
+            )
         }), 500
 
     data = request.get_json(silent=True) or {}
-    question = str(data.get("message", "")).strip()
+
+    question = str(
+        data.get("message")
+        or data.get("question")
+        or data.get("prompt")
+        or ""
+    ).strip()
+
     history = data.get("history", [])
 
     if not question:
@@ -738,112 +755,439 @@ def ai_chat():
 
     if len(question) > 2000:
         return jsonify({
-            "message": "Please keep your question under 2000 characters."
+            "message": (
+                "Please keep your question under "
+                "2000 characters."
+            )
         }), 400
 
+    # --------------------------------------------------
+    # 2. Identify the logged-in user
+    # --------------------------------------------------
+    user = get_current_user()
+
+    if not user:
+        return jsonify({
+            "message": (
+                "Your login session may have expired. "
+                "Please log in again."
+            )
+        }), 401
+
+    # --------------------------------------------------
+    # 3. Collect verified student learning progress
+    # --------------------------------------------------
+    student_context = (
+        "Personal student learning information "
+        "has not been provided."
+    )
+
+    role = str(
+        getattr(user, "role", "")
+    ).lower()
+
+    if role == "student":
+        try:
+            enrolled_records = []
+
+            enrollments = Enrollment.query.filter_by(
+                student_id=user.id
+            ).all()
+
+            for enrollment in enrollments:
+                course = db.session.get(
+                    Course,
+                    enrollment.course_id
+                )
+
+                if course is None:
+                    continue
+
+                lessons = Lesson.query.filter_by(
+                    course_id=course.id
+                ).order_by(
+                    Lesson.order.asc()
+                ).all()
+
+                completed_titles = []
+                unfinished_titles = []
+
+                for lesson in lessons:
+                    progress_record = (
+                        LessonProgress.query.filter_by(
+                            student_id=user.id,
+                            lesson_id=lesson.id
+                        ).first()
+                    )
+
+                    if (
+                        progress_record
+                        and progress_record.completed
+                    ):
+                        completed_titles.append(
+                            lesson.title
+                        )
+                    else:
+                        unfinished_titles.append(
+                            lesson.title
+                        )
+
+                total_lessons = len(lessons)
+                completed_count = len(
+                    completed_titles
+                )
+
+                percentage = (
+                    round(
+                        completed_count
+                        / total_lessons
+                        * 100
+                    )
+                    if total_lessons > 0
+                    else 0
+                )
+
+                enrolled_records.append({
+                    "course": course.title,
+                    "total_lessons": total_lessons,
+                    "completed_lessons": completed_count,
+                    "progress_percent": percentage,
+                    "completed_lesson_titles": (
+                        completed_titles[:20]
+                    ),
+                    "unfinished_lessons": (
+                        unfinished_titles[:20]
+                    )
+                })
+
+            student_context = (
+                f"Student name: {user.name}\n"
+                f"Enrolled course records: "
+                f"{enrolled_records}"
+            )
+
+            if not enrolled_records:
+                student_context += (
+                    "\nNo enrolled courses were found "
+                    "for this student."
+                )
+
+        except Exception as error:
+            # A progress-query problem should not prevent
+            # the tutor from answering general questions.
+            print(
+                "Student progress lookup failed:",
+                str(error)
+            )
+
+            student_context = (
+                "Student progress could not be retrieved "
+                "from the database for this request. "
+                "Do not invent personal progress."
+            )
+
+    elif role == "admin":
+        student_context = (
+            "The logged-in user is an administrator. "
+            "No personal student progress is provided."
+        )
+
+    # --------------------------------------------------
+    # 4. Set the tutor's instructions
+    # --------------------------------------------------
+    system_prompt = f"""
+You are Learnova AI Tutor, a friendly, patient,
+knowledgeable learning assistant for students.
+
+YOUR MAIN PURPOSE:
+Help students understand concepts, study effectively,
+solve learning problems, practise skills, and improve.
+
+TOPICS YOU CAN HELP WITH:
+- Python, Java, JavaScript, C, C++, SQL and programming
+- HTML, CSS, React, Flask and web development
+- Data structures and algorithms
+- Artificial intelligence and machine learning
+- Data science, NumPy, Pandas and data analysis
+- Mathematics, science and academic concepts
+- Databases, software engineering and computer science
+- Project explanations, debugging and interview preparation
+- Study plans, revision strategies and practice questions
+- Other general educational and knowledge questions
+
+HOW TO ANSWER:
+1. Answer the student's actual question directly.
+2. Use clear, student-friendly language.
+3. Give examples, code or step-by-step explanations
+   when they would make the answer more useful.
+4. Explain technical terms in simple words.
+5. If the student asks a follow-up, use the conversation
+   history to understand what they mean.
+6. If a question is ambiguous, state your assumption
+   or ask a brief follow-up question.
+7. Never claim that you executed code or checked a live
+   system unless that actually happened.
+8. Be honest when you are uncertain.
+9. Do not invent sources, facts or student information.
+10. Keep answers useful and reasonably concise, but give
+    more detail when the student requests it.
+
+PERSONAL LEARNING PROGRESS:
+Use only the verified student context below for claims
+about the logged-in student's enrollments, lessons,
+and completion percentages.
+If progress data is missing, say that it is unavailable.
+Never guess or fabricate a student's progress.
+Use the unfinished lesson list to recommend what to study
+next when the student asks.
+
+VERIFIED STUDENT CONTEXT:
+{student_context}
+"""
+
+    # --------------------------------------------------
+    # 5. Convert chat history into Gemini format
+    # --------------------------------------------------
     contents = []
 
-    # Convert the existing chat history into Gemini format.
     if isinstance(history, list):
         for item in history[-10:]:
             if not isinstance(item, dict):
                 continue
 
-            role = item.get("role")
-            content = item.get("content")
+            raw_role = str(
+                item.get("role")
+                or item.get("sender")
+                or ""
+            ).lower()
 
-            if role not in ("user", "assistant"):
+            if raw_role in (
+                "assistant",
+                "ai",
+                "bot",
+                "model"
+            ):
+                gemini_role = "model"
+
+            elif raw_role in (
+                "user",
+                "student",
+                "human"
+            ):
+                gemini_role = "user"
+
+            else:
                 continue
 
-            if not isinstance(content, str) or not content.strip():
+            # Support several common frontend history formats.
+            message_text = (
+                item.get("text")
+                or item.get("content")
+                or item.get("message")
+                or ""
+            )
+
+            if isinstance(message_text, list):
+                message_text = " ".join(
+                    str(part.get("text", ""))
+                    for part in message_text
+                    if isinstance(part, dict)
+                )
+
+            if not isinstance(message_text, str):
+                continue
+
+            message_text = message_text.strip()
+
+            if not message_text:
                 continue
 
             contents.append({
-                "role": "user" if role == "user" else "model",
-                "parts": [{"text": content[:2000]}]
+                "role": gemini_role,
+                "parts": [{
+                    "text": message_text[:3000]
+                }]
             })
 
-    # Add the student's latest question.
-    contents.append({
-        "role": "user",
-        "parts": [{"text": question}]
-    })
+    # Gemini conversations should begin with a user message.
+    while (
+        contents
+        and contents[0]["role"] != "user"
+    ):
+        contents.pop(0)
 
-    payload = {
-        "systemInstruction": {
-            "parts": [{
-                "text": (
-                    "You are Learnova AI Tutor. Help students learn "
-                    "Python, Data Science, Machine Learning, SQL, "
-                    "Artificial Intelligence, and Web Development. "
-                    "Explain concepts clearly for beginners and provide "
-                    "simple examples when useful."
-                )
-            }]
-        },
-        "contents": contents,
-        "generationConfig": {
-            "temperature": 0.7,
-            "maxOutputTokens": 1000
-        }
-    }
-
-    url = (
-        "https://generativelanguage.googleapis.com/"
-        "v1beta/models/gemini-3.8-flash:generateContent"
+    # Avoid adding the current question twice if the frontend
+    # already included it in its history.
+    question_already_added = (
+        bool(contents)
+        and contents[-1]["role"] == "user"
+        and contents[-1]["parts"][0]["text"].strip()
+        == question
     )
 
-    try:
-        response = requests.post(
-            url,
-            headers={
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json"
+    if not question_already_added:
+        contents.append({
+            "role": "user",
+            "parts": [{"text": question}]
+        })
+
+    # --------------------------------------------------
+    # 6. Call Gemini with a fallback model
+    # --------------------------------------------------
+    models_to_try = [
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite"
+    ]
+
+    last_error = "No Gemini model returned an answer."
+
+    for model_name in models_to_try:
+        url = (
+            "https://generativelanguage.googleapis.com/"
+            "v1beta/models/"
+            f"{model_name}:generateContent"
+        )
+
+        payload = {
+            "systemInstruction": {
+                "parts": [{
+                    "text": system_prompt
+                }]
             },
-            json=payload,
-            timeout=60
-        )
+            "contents": contents,
+            "generationConfig": {
+                "temperature": 0.4,
+                "maxOutputTokens": 1200,
+                "thinkingConfig": {
+                    "thinkingLevel": "low"
+                }
+            }
+        }
 
-        if not response.ok:
+        try:
+            result = requests.post(
+                url,
+                headers={
+                    "x-goog-api-key": api_key,
+                    "Content-Type": "application/json"
+                },
+                json=payload,
+                timeout=(8, 25)
+            )
+
+        except requests.Timeout:
+            last_error = (
+                f"{model_name} timed out while generating "
+                "a response."
+            )
+
+            print("Gemini timeout:", last_error)
+            continue
+
+        except requests.RequestException as error:
+            last_error = (
+                f"Connection problem with {model_name}."
+            )
+
             print(
-                "Gemini API error:",
-                response.status_code,
-                response.text[:1000]
+                "Gemini connection error:",
+                str(error)
+            )
+            continue
+
+        # Handle unsuccessful API responses.
+        if not result.ok:
+            print(
+                f"Gemini API error for {model_name}:",
+                result.status_code,
+                result.text[:1000]
             )
 
-        response.raise_for_status()
-        result = response.json()
+            last_error = (
+                f"Gemini returned HTTP "
+                f"{result.status_code} for {model_name}."
+            )
 
-        candidates = result.get("candidates", [])
+            # These usually indicate an authentication or
+            # request-configuration problem. Retrying other
+            # models will not normally correct those problems.
+            if result.status_code in (400, 401, 403):
+                break
 
-        if not candidates:
-            return jsonify({
-                "message": "Gemini returned no answer. Please try again."
-            }), 502
+            # Try another model for unavailable-model,
+            # quota, rate-limit or temporary server errors.
+            continue
 
-        parts = candidates[0].get("content", {}).get("parts", [])
-        answer = "\n".join(
-            part["text"]
-            for part in parts
-            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        try:
+            response_data = result.json()
+        except ValueError:
+            last_error = (
+                "Gemini returned an invalid response."
+            )
+            continue
+
+        candidates = response_data.get(
+            "candidates", []
         )
 
-        if not answer.strip():
-            return jsonify({
-                "message": "Gemini returned an empty answer."
-            }), 502
+        reply_parts = []
 
-        # Keep the existing React interface compatible.
-        return jsonify({"answer": answer}), 200
+        if candidates:
+            candidate = candidates[0]
 
-    except requests.RequestException as error:
-        print("Gemini API request failed:", error)
-
-        return jsonify({
-            "message": (
-                "Gemini could not respond. Check the backend "
-                "terminal for the API error."
+            candidate_content = candidate.get(
+                "content", {}
             )
-        }), 502
+
+            for part in candidate_content.get(
+                "parts", []
+            ):
+                if (
+                    isinstance(part, dict)
+                    and isinstance(part.get("text"), str)
+                ):
+                    reply_parts.append(
+                        part["text"]
+                    )
+
+        reply = "\n".join(
+            reply_parts
+        ).strip()
+
+        if reply:
+            # Return several common response field names so
+            # the existing frontend can read the answer.
+            return jsonify({
+                "reply": reply,
+                "answer": reply,
+                "response": reply,
+                "message": reply
+            }), 200
+
+        last_error = (
+            f"{model_name} returned no answer text."
+        )
+
+        print(
+            "Gemini returned no text:",
+            str(response_data)[:1000]
+        )
+
+    # --------------------------------------------------
+    # 7. Return a useful error if every attempt fails
+    # --------------------------------------------------
+    print(
+        "All Gemini attempts failed:",
+        last_error
+    )
+
+    return jsonify({
+        "message": (
+            "The AI Tutor could not get a response from "
+            "Gemini. Please try again. "
+            f"Details: {last_error}"
+        )
+    }), 502
 if __name__ == "__main__":
     app.run(debug=True, port=5000)
